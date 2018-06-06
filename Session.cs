@@ -403,8 +403,8 @@ public class Session
 
     private void Log(string msg)
     {
-        //Console.WriteLine(msg);
-        Debug.Log(msg);
+        Console.WriteLine(msg);
+        // Debug.Log(msg);
     }
 
     private async Task<bool> ProcessFileDownload(SessionObjectRemoteFile obj)
