@@ -1,19 +1,45 @@
 // (C) 2018 Michal Ratajsky <michal.ratajsky@gmail.com>
+#define USE_DOTNET
+
 using System;
-using System.Collections;
 using System.Collections.Generic;
-using System.ComponentModel;
+using System.Diagnostics;
 using System.Net.Http;
 using System.Net.Http.Headers;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Timers;
 using Newtonsoft.Json;
 using WebSocketSharp;
-/*
+
+#if USE_DOTNET
+// Provide custom Vector3 and Quaternion to allow compiling outside Unity
+public struct Vector3
+{
+    public float x { get; set; }
+    public float y { get; set; }
+    public float z { get; set; }
+    public Vector3(float x, float y, float z) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+    }
+}
+public struct Quaternion
+{
+    public float x { get; set; }
+    public float y { get; set; }
+    public float z { get; set; }
+    public float w { get; set; }
+    public Quaternion(float x, float y, float z, float w) {
+        this.x = x;
+        this.y = y;
+        this.z = z;
+        this.w = w;
+    }
+}
+#else
 using UnityEngine;
-*/
+#endif
 
 public class SessionObjectSelectionChangedArgs : EventArgs
 {
@@ -29,10 +55,6 @@ public class SessionObjectSelectionChangedArgs : EventArgs
 
 public class Session
 {
-    // TODO: for now the session name is hardcoded, but the server is able
-    // to manage multiple sessions
-    public static string SessionName = "default";
-
     public enum ConnectResult {
         Success,                // Connection succeeded
         Error,                  // WebSockets connction failed
@@ -65,6 +87,9 @@ public class Session
     public bool Connected { get; private set; }
     public SynchronizationContext Context { get; set; }
 
+    // Name of the server session
+    public string SessionName = "default";
+
     public string HttpHost = "http://localhost:8080";
     public string WSHost = "ws://localhost:8089";
     // public string HttpHost = "http://10.11.96.136:8080";
@@ -74,6 +99,10 @@ public class Session
 
     private bool Connecting;
     private int LastSeq;
+    private bool sendingMove;
+    private WSMessage queuedMove;
+    private int delayMove;
+    private Stopwatch stopwatchMove = new Stopwatch();
 
     // HTTP stuff
     private readonly HttpClient client = new HttpClient();
@@ -100,67 +129,85 @@ public class Session
         wsClient.OnOpen += OnWsOpen;
         wsClient.OnClose += OnWsClose;
         wsClient.OnMessage += OnWsMessage;
+        wsClient.OnError += OnWsError;
         client.BaseAddress = new Uri(HttpHost);
         client.DefaultRequestHeaders.Accept.Clear();
         client.DefaultRequestHeaders.Accept.Add(
             new MediaTypeWithQualityHeaderValue("application/json"));
-        
-        timer.Elapsed += ProcessFileDownloadTimer;
-        timer.Start();
     }
 
-    private async void OnWsOpen(object sender, EventArgs eventArgs)
+    private class WSMessage {
+        public string GetMessageTextData() {
+            return JsonConvert.SerializeObject(this);
+        }
+    }
+
+    private class WSAddSessionMessage : WSMessage {
+        public string Event = "SESSION_ADDED";
+        public string Name;
+        public WSAddSessionMessage(string name) {
+            Name = name;
+        }
+    }
+
+    private void OnWsOpen(object sender, EventArgs eventArgs)
     {
         if (!Connecting) {
             Log("Unexpected WS open");
             return;
         }
-        var handler = OnConnectDone;
-        // Download all meta-data
-        Log("Retriving items for the first time...");
-        var result = await client.GetAsync($"item/all/{SessionName}");
-        if (result.IsSuccessStatusCode) {
-            try {
-                var s = await result.Content.ReadAsStringAsync();
-                // The JSON format is {data: [ item1, item2, ... ]}
-                var data = JsonConvert.DeserializeObject<ReceivedData>(s);
-                if (data.data.Count == 0)
-                    Log("The session is empty");
-                foreach (var item in data.data) {
-                    try {
-                        Log($"Adding session item {item.Uid}");
-                        await ProcessNewItem(item);
-                    } catch (Exception e) {
-                        Log(e.ToString());
-                        if (item.Uid != null)
-                            Log($"Skipping invalid item {item.Uid}");
-                        else
-                            Log("Skipping invalid item");
+        // Make sure the session is recorded on the server
+        var message = new WSAddSessionMessage(SessionName);
+        wsClient.SendAsync(message.GetMessageTextData(), async (res) => {
+            Log($"Created session {SessionName}");
+            // Download all meta-data
+            Log("Retriving items for the first time...");
+            var result = await client.GetAsync($"item/all/{SessionName}");
+            if (result.IsSuccessStatusCode) {
+                try {
+                    var s = await result.Content.ReadAsStringAsync();
+                    // The JSON format is {data: [ item1, item2, ... ]}
+                    var data = JsonConvert.DeserializeObject<ReceivedData>(s);
+                    if (data.data.Count == 0)
+                        Log("The session is empty");
+                    foreach (var item in data.data) {
+                        try {
+                            Log($"Adding session item {item.Uid}");
+                            await ProcessNewItem(item);
+                        } catch (Exception e) {
+                            Log(e.ToString());
+                            if (item.Uid != null)
+                                Log($"Skipping invalid item {item.Uid}");
+                            else
+                                Log("Skipping invalid item");
+                        }
                     }
+                } catch (Exception e) {
+                    Connecting = false;
+                    Log(e.ToString());
+                    WsClose();
+                    OnConnectDone?.Invoke(this, ConnectResult.SynchronizationError);
                 }
-            } catch (Exception e) {
                 Connecting = false;
-                Log(e.ToString());
+                Connected = true;
+                OnConnectDone?.Invoke(this, ConnectResult.Success);
+            } else {
+                Connecting = false;
+                Log($"Could not download items, result code = {result.StatusCode.ToString()}");
                 WsClose();
-                if (handler != null)
-                    handler(this, ConnectResult.SynchronizationError);
+                OnConnectDone?.Invoke(this, ConnectResult.SynchronizationError);
             }
-            Connecting = false;
-            Connected = true;
-            if (handler != null)
-                handler(this, ConnectResult.Success);
-        } else {
-            Connecting = false;
-            Log($"Could not download items, result code = {result.StatusCode.ToString()}");
-            WsClose();
-            if (handler != null)
-                handler(this, ConnectResult.SynchronizationError);
-        }
+        });
     }
 
     private void OnWsClose(object sender, CloseEventArgs e)
     {
-        Log($"WS connection closed, code = {e.code}, reason = {e.reason}")
+        Log($"WS connection closed, code = {e.Code}, reason = {e.Reason}");
+    }
+
+    private void OnWsError(object sender, ErrorEventArgs e)
+    {
+        Log($"WS error: {e.Message}");
     }
 
     #pragma warning disable 0649
@@ -185,12 +232,10 @@ public class Session
     #pragma warning restore 0649
 
     // Connect to the server
-    public bool Connect(bool maintainSession = false)
+    public bool Connect()
     {
-        var handler = OnConnectDone;
         if (Connected || Connecting) {
-            if (handler != null)
-                handler(this, ConnectResult.AlreadyConnected);
+            OnConnectDone?.Invoke(this, ConnectResult.AlreadyConnected);
             return false;
         }
         Connecting = true;
@@ -201,8 +246,7 @@ public class Session
         } catch (Exception e) {
             Connecting = false;
             Log(e.ToString());
-            if (handler != null)
-                handler(this, ConnectResult.Error);
+            OnConnectDone?.Invoke(this, ConnectResult.Error);
             return false;
         }
     }
@@ -215,9 +259,7 @@ public class Session
         Log("Closing connection...");
         Connected = false;
         WsClose();
-        var handler = OnDisconnected;
-        if (handler != null)
-            handler(this, DisconnectReason.Closing);
+        OnDisconnected?.Invoke(this, DisconnectReason.Closing);
     }
 
     // Add an object to the shared session
@@ -268,11 +310,6 @@ public class Session
         return new List<SessionObject>(objectDict.Values);
     }
 
-    private class WSMessage {
-        public string GetMessageTextData() {
-            return JsonConvert.SerializeObject(this);
-        }
-    }
     private class WSSelectionChangedMessage : WSMessage {
         public string Event = "ITEM_SELECTION_CHANGED";
         public Guid Uid;
@@ -291,6 +328,12 @@ public class Session
         // Object selection is not stored here, we just send it out
         var message = new WSSelectionChangedMessage(obj.Uid, isSelected);
         try {
+            if (!isSelected && queuedMove != null) {
+                // Flush queued move before deselecting
+                var move = queuedMove;
+                queuedMove = null;
+                WsSendMessage(move);
+            }
             WsSendMessage(message);
             return true;
         } catch (Exception e) {
@@ -348,7 +391,12 @@ public class Session
         var message = new WSMoveMessage(obj.Uid, position, scale, rotation);
         try {
             // Broadcast the update
-            WsSendMessage(message);
+            if (sendingMove)
+                queuedMove = message;
+            else {
+                // Log($"Moving object {obj.Uid}");
+                WsSendMoveMessage(message);
+            }
             return true;
         } catch (Exception e) {
             Log(e.ToString());
@@ -441,13 +489,13 @@ public class Session
         }
         switch (data.ObjectType) {
             case "File":
-                obj = new SessionObjectRemoteFile(uid, data.FileName);
+                obj = new SessionObjectRemoteFile(uid, data.FileName, data.Session);
                 break;
             case "Link":
-                obj = new SessionObjectLink(uid, new Uri(data.Url));
+                obj = new SessionObjectLink(uid, new Uri(data.Url), data.Session);
                 break;
             case "Text":
-                obj = new SessionObjectText(uid, data.Text);
+                obj = new SessionObjectText(uid, data.Text, data.Session);
                 break;
             default:
                 Log($"Invalid object type: {data.ObjectType}");
@@ -472,21 +520,21 @@ public class Session
         objectDict.Add(obj.Uid, obj);
         if (obj is SessionObjectRemoteFile) {
             Context.Post((o) => {
-                OnObjectAddedMetaDataOnly(this, obj);
+                OnObjectAddedMetaDataOnly?.Invoke(this, obj);
             }, null);
             Log($"Downloading file for object {obj.Uid}...");
             var downloaded = await ProcessFileDownload(obj as SessionObjectRemoteFile);
             if (!downloaded) {
                 Log($"Failed to download file for object {obj.Uid}");
                 Context.Post((o) => {
-                    OnObjectRemoved(this, obj);
+                    OnObjectRemoved?.Invoke(this, obj);
                 }, null);
                 return false;
             }
             // Fall-through as we need to raise the real event
         }
         Context.Post((o) => {
-            OnObjectAdded(this, obj);
+            OnObjectAdded?.Invoke(this, obj);
         }, null);
         return true;
     }
@@ -498,6 +546,8 @@ public class Session
         public int Seq;
         // Selection message
         public bool IsSelected;
+
+        public int IntValue;
     }
     #pragma warning restore 0649
 
@@ -546,7 +596,7 @@ public class Session
                 data.Rotation[3]);
         }
         Context.Post((o) => {
-            OnObjectMoved(this, obj);
+            OnObjectMoved?.Invoke(this, obj);
         }, null);
     }
 
@@ -561,7 +611,7 @@ public class Session
         // Remove the object from local cache and raise an event
         objectDict.Remove(obj.Uid);
         Context.Post((o) => {
-            OnObjectRemoved(this, obj);
+            OnObjectRemoved?.Invoke(this, obj);
         }, null);
     }
 
@@ -574,8 +624,15 @@ public class Session
             return;
         }
         Context.Post((o) => {
-            OnObjectSelectionChanged(this, new SessionObjectSelectionChangedArgs(obj, data.IsSelected));
+            OnObjectSelectionChanged?.Invoke(
+                this,
+                new SessionObjectSelectionChangedArgs(obj, data.IsSelected));
         }, null);
+    }
+
+    private void ProcessWSMoveDelaySet(WSReceivedObject data)
+    {
+        delayMove = data.IntValue;
     }
 
     private void WsClose()
@@ -593,7 +650,8 @@ public class Session
         }
     }
 
-    private void OnWsMessage(object source, MessageEventArgs args){
+    private void OnWsMessage(object source, MessageEventArgs args)
+    {
         if (args.IsText) {
             var message = args.Data;
             Log($"WS << {message}");
@@ -602,7 +660,7 @@ public class Session
                 Log($"Event: {item.Event}, Seq = {item.Seq}");
                 if (LastSeq > 0 && LastSeq+1 != item.Seq)
                     Log($"Seq = {item.Seq}, but LastSeq = {LastSeq}");
-                LastSeq = Seq;
+                LastSeq = item.Seq;
                 switch (item.Event) {
                     case "ITEM_ADDED":
                         ProcessWSItemAdded(item);
@@ -615,6 +673,9 @@ public class Session
                         break;
                     case "ITEM_SELECTION_CHANGED":
                         ProcessWSItemSelectionChanged(item);
+                        break;
+                    case "MOVE_DELAY_SET":
+                        ProcessWSMoveDelaySet(item);
                         break;
                     default:
                         Log($"Ignoring unknown event {item.Event}");
@@ -630,12 +691,14 @@ public class Session
         }
     }
 
-    private void WsSendMessage(WSMessage message)
+    private void WsSendMessage(WSMessage message, Action<bool> action = null)
     {
         var data = message.GetMessageTextData();
         try {
             wsClient.SendAsync(data, (res) => {
                 Log($"WS({res}) >> {message}");
+                if (action != null)
+                    action(res);
             });
         } catch (Exception e) {
             Log(e.ToString());
@@ -643,11 +706,28 @@ public class Session
             Connected = false;
             if (!Connecting) {
                 WsClose();
-                var handler = OnDisconnected;
-                if (handler != null)
-                    handler(this, DisconnectReason.ClosedByServer);
+                OnDisconnected?.Invoke(this, DisconnectReason.ClosedByServer);
             }
             throw;
         }
+    }
+
+    private void WsSendMoveMessage(WSMessage message)
+    {
+        sendingMove = true;
+        stopwatchMove.Start();
+        WsSendMessage(message, (res) => {
+            stopwatchMove.Stop();
+            // If there is a queued move and it is too early for it, wait
+            // This also queues incoming move arrived during that period
+            var elapsed = stopwatchMove.Elapsed;
+            if (delayMove > 0 && elapsed.TotalMilliseconds < delayMove)
+                Thread.Sleep((int) (delayMove - elapsed.TotalMilliseconds));
+            var move = queuedMove;
+            queuedMove = null;
+            sendingMove = false;
+            if (move != null)
+                WsSendMoveMessage(move);
+        });
     }
 }

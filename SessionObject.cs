@@ -3,35 +3,6 @@ using System;
 using System.IO;
 using System.Net.Http;
 using Newtonsoft.Json;
-/*
-using UnityEngine;
-*/
-
-// Provide custom Vector3 and Quaternion to allow compiling outside Unity
-public struct Vector3 
-{
-    public float x { get; set; }
-    public float y { get; set; }
-    public float z { get; set; }
-    public Vector3(float x, float y, float z) {
-        this.x = x;
-        this.y = y;
-        this.z = z;
-    }
-}
-public struct Quaternion
-{
-    public float x { get; set; }
-    public float y { get; set; }
-    public float z { get; set; }
-    public float w { get; set; }
-    public Quaternion(float x, float y, float z, float w) {
-        this.x = x;
-        this.y = y;
-        this.z = z;
-        this.w = w;
-    }
-}
 
 public abstract class SessionObject
 {
@@ -45,7 +16,9 @@ public abstract class SessionObject
 
     // Object identifier as UUID -- auto-generated
     public Guid Uid { get; protected set; }
-    
+
+    public string SessionName { get; protected set; }
+
     // Object coordinates
     public Vector3 Position { get; set; }
     public Vector3 Scale { get; set; }
@@ -56,6 +29,7 @@ public abstract class SessionObject
 
     public SessionObject(Guid uid,
                          Type type,
+                         string sessionName,
                          Vector3? position = null,
                          Vector3? scale = null,
                          Quaternion? rotation = null,
@@ -73,6 +47,7 @@ public abstract class SessionObject
                 ObjectType = "Text";
                 break;
         }
+        SessionName = sessionName;
         if (position != null)
             Position = (Vector3) position;
         else
@@ -92,7 +67,7 @@ public abstract class SessionObject
     {
         var content = new MultipartFormDataContent();
         content.Add(new StringContent(Uid.ToString()), "Uid");
-        content.Add(new StringContent(Session.SessionName), "Session");
+        content.Add(new StringContent(SessionName), "Session");
         content.Add(new StringContent(ObjectType), "ObjectType");
         var position = new double[] {
             Position.x,
@@ -126,20 +101,22 @@ public class SessionObjectFile : SessionObject
 
     public SessionObjectFile(Guid uid,
                              string fileName,
+                             string sessionName,
                              Vector3? position = null,
                              Vector3? scale = null,
                              Quaternion? rotation = null,
                              string name = "")
-        : base(uid, Type.File, position, scale, rotation, name)
+        : base(uid, Type.File, sessionName, position, scale, rotation, name)
     {
         FileName = fileName;
     }
     public SessionObjectFile(string fileName,
+                             string sessionName,
                              Vector3? position = null,
                              Vector3? scale = null,
                              Quaternion? rotation = null,
                              string name = "")
-        : this(Guid.NewGuid(), fileName, position, scale, rotation, name)
+        : this(Guid.NewGuid(), fileName, sessionName, position, scale, rotation, name)
     {
     }
 
@@ -162,19 +139,21 @@ public class SessionObjectRemoteFile : SessionObjectFile
 
     public SessionObjectRemoteFile(Guid uid,
                                    string fileName,
+                                   string sessionName,
                                    Vector3? position = null,
                                    Vector3? scale = null,
                                    Quaternion? rotation = null,
                                    string name = "")
-        : base(uid, fileName, position, scale, rotation, name)
+        : base(uid, fileName, sessionName, position, scale, rotation, name)
     {
     }
     public SessionObjectRemoteFile(string fileName,
+                                   string sessionName,
                                    Vector3? position = null,
                                    Vector3? scale = null,
                                    Quaternion? rotation = null,
                                    string name = "")
-        : this(Guid.NewGuid(), fileName, position, scale, rotation, name)
+        : this(Guid.NewGuid(), fileName, sessionName, position, scale, rotation, name)
     {
     }
 
@@ -193,20 +172,22 @@ public class SessionObjectLink : SessionObject
 
     public SessionObjectLink(Guid uid,
                              Uri url,
+                             string sessionName,
                              Vector3? position = null,
                              Vector3? scale = null,
                              Quaternion? rotation = null,
                              string name = "")
-        : base(uid, Type.Link, position, scale, rotation, name)
+        : base(uid, Type.Link, sessionName, position, scale, rotation, name)
     {
         Url = url;
     }
     public SessionObjectLink(Uri url,
+                             string sessionName,
                              Vector3? position = null,
                              Vector3? scale = null,
                              Quaternion? rotation = null,
                              string name = "")
-        : this(Guid.NewGuid(), url, position, scale, rotation, name)
+        : this(Guid.NewGuid(), url, sessionName, position, scale, rotation, name)
     {
     }
 
@@ -224,20 +205,22 @@ public class SessionObjectText : SessionObject
 
     public SessionObjectText(Guid uid,
                              string text,
+                             string sessionName,
                              Vector3? position = null,
                              Vector3? scale = null,
                              Quaternion? rotation = null,
                              string name = "")
-        : base(uid, Type.Text, position, scale, rotation, name)
-    {
+        : base(uid, Type.Text, sessionName, position, scale, rotation, name)
+        {
         Text = text;
     }
     public SessionObjectText(string text,
+                             string sessionName,
                              Vector3? position = null,
                              Vector3? scale = null,
                              Quaternion? rotation = null,
                              string name = "")
-        : this(Guid.NewGuid(), text, position, scale, rotation, name)
+        : this(Guid.NewGuid(), text, sessionName, position, scale, rotation, name)
     {
     }
 
